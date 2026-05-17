@@ -581,4 +581,11 @@ If you hate bloated enterprise software and want to make this tool even sharper 
 ## License
 
 The MIT License. Please see LICENSE.md for more information.
-```
+
+---
+
+"If you can't measure it, you can't fix it."
+
+— ezmu (EzEldeen A. Y. Mushtaha)
+
+---

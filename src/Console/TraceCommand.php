@@ -1,0 +1,1197 @@
+<?php
+
+namespace ResourceThief\Console;
+
+use Illuminate\Console\Command;
+use Illuminate\Support\Collection;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Route;
+
+class TraceCommand extends Command
+{
+    protected $signature = 'trace {expression? : PHP code or route to execute and profile}
+                            {--t|tree : Display full call tree}
+                            {--l|level=3 : Call tree depth (1-10)}
+                            {--d|details : Show arguments and return values}
+                            {--w|warnings : Show resource warnings only}
+                            {--queries : Show SQL queries only}
+                            {--s|summary : Show summary only}
+                            {--route : Execute as route instead of raw code}
+                            {--params= : JSON params for route execution}
+                            {--memory : Deep memory analysis}
+                            {--profile : Create performance profile}
+                            {--profile-name= : Name for the profile}
+                            {--fix= : Name of fix being applied}
+                            {--compare : Compare with baseline}
+                            {--report : Generate profile report}
+                            {--save : Save profile to file}
+                            {--load= : Load existing profile}
+                            {--push : Save checkpoint}
+                            --pop : Rollback to checkpoint}';
+
+    protected $description = 'Resource Thief Detector - Complete profiling suite';
+
+    private array $callTree = [];
+    private array $currentBranch = [];
+    private int $callId = 0;
+    private array $warnings = [];
+    private array $queries = [];
+    private array $loopAnalysis = [];
+    private $profileManager = null;
+    private array $codeBuffer = [];
+    private array $memorySnapshots = [];
+
+    public function handle()
+    {
+        $expression = $this->argument('expression');
+        $isProfileMode = $this->option('profile');
+        $profileName = $this->option('profile-name');
+
+        if ($isProfileMode || $profileName || $this->option('fix') || $this->option('compare') || $this->option('report')) {
+            $this->initProfileMode($profileName ?? 'default_profile');
+        }
+
+        if ($this->option('load')) {
+            $this->loadAndDisplayProfile($this->option('load'));
+            return Command::SUCCESS;
+        }
+
+        if ($this->option('compare')) {
+            $this->displayProfileComparison();
+            return Command::SUCCESS;
+        }
+
+        if ($this->option('report')) {
+            $this->displayProfileReport();
+            return Command::SUCCESS;
+        }
+
+        if ($expression) {
+            $this->executeAndTrace($expression);
+        } else {
+            $this->interactiveMode();
+        }
+
+        return Command::SUCCESS;
+    }
+
+    protected function interactiveMode()
+    {
+        $this->info($this->color("Resource Thief Detector - Complete Suite", 'CYAN', 'BOLD'));
+        $this->line("");
+        $this->line($this->color("COMMANDS:", 'YELLOW'));
+        $this->line("  exit, clear, help");
+        $this->line("  profile NAME     - Start profiling mode");
+        $this->line("  fix NAME         - Apply and measure a fix");
+        $this->line("  push/pop         - Checkpoint management");
+        $this->line("  compare/report   - View results");
+        $this->line("  save/load        - Persist profiles");
+        $this->line("  GET /uri         - Add a route to profile");
+        $this->line("");
+
+        while (true) {
+            $input = $this->ask($this->color(">>>", 'CYAN'));
+
+            if ($input === 'exit') {
+                break;
+            }
+
+            if ($input === 'clear') {
+                system('clear');
+                continue;
+            }
+
+            if ($input === 'help') {
+                $this->displayHelp();
+                continue;
+            }
+
+            if (str_starts_with($input, 'profile ')) {
+                $name = substr($input, 8);
+                $this->initProfileMode($name);
+                $this->info($this->color("Profiling mode active: {$name}", 'GREEN'));
+                $this->codeBuffer = [];
+                continue;
+            }
+
+            if (str_starts_with($input, 'fix ')) {
+                $fixName = substr($input, 4);
+                if (!$this->profileManager) {
+                    $this->error("No active profile. Use: profile NAME first");
+                    continue;
+                }
+                $this->runFix($fixName);
+                continue;
+            }
+
+            if ($input === 'push') {
+                if (!$this->profileManager) {
+                    $this->error("No active profile");
+                    continue;
+                }
+                $this->profileManager->push();
+                $this->info($this->color("Checkpoint saved", 'GREEN'));
+                continue;
+            }
+
+            if ($input === 'pop') {
+                if (!$this->profileManager) {
+                    $this->error("No active profile");
+                    continue;
+                }
+                $this->profileManager->pop();
+                $this->info($this->color("Rolled back to last checkpoint", 'YELLOW'));
+                continue;
+            }
+
+            if ($input === 'compare') {
+                $this->displayProfileComparison();
+                continue;
+            }
+
+            if ($input === 'report') {
+                $this->displayProfileReport();
+                continue;
+            }
+
+            if ($input === 'save') {
+                if (!$this->profileManager) {
+                    $this->error("No active profile");
+                    continue;
+                }
+                $file = $this->profileManager->save();
+                $this->info($this->color("Profile saved: {$file}", 'GREEN'));
+                continue;
+            }
+
+            if (str_starts_with($input, 'load ')) {
+                $file = substr($input, 5);
+                $this->loadAndDisplayProfile($file);
+                continue;
+            }
+
+            if ($this->profileManager && preg_match('/^(GET|POST|PUT|DELETE)\s+(\/\S+)/', $input, $matches)) {
+                $method = $matches[1];
+                $uri = $matches[2];
+                $code = "Route::dispatch(Request::create('{$uri}', '{$method}'));";
+                $this->codeBuffer[] = $code;
+                $this->line($this->color("Route added: {$method} {$uri}", 'GREEN'));
+                continue;
+            }
+
+            if ($this->profileManager && empty($this->codeBuffer)) {
+                $this->codeBuffer[] = $input;
+                $this->line($this->color("Code added. Type 'baseline' to measure, or continue adding code.", 'DIM'));
+                continue;
+            }
+
+            if ($this->profileManager && $input === 'baseline') {
+                $this->runBaseline();
+                $this->codeBuffer = [];
+                continue;
+            }
+
+            $this->executeAndTrace($input);
+        }
+    }
+    protected function initProfileMode(string $name): void
+    {
+        $this->profileManager = new \ResourceThief\Profiling\ProfileManager($name);
+        $this->info($this->color("Profile created: {$name}", 'GREEN'));
+    }
+
+    protected function runBaseline(): void
+    {
+        if (empty($this->codeBuffer)) {
+            $this->error("No code to profile. Write some code first.");
+            $this->line("Example: >>> GET /engine-metrics/film-performance");
+            return;
+        }
+
+        $code = implode("\n", $this->codeBuffer);
+
+        if (preg_match('/^(GET|POST|PUT|DELETE)\s+(\/\S+)/', $code, $matches)) {
+            $method = $matches[1];
+            $uri = $matches[2];
+            $code = "Route::dispatch(Request::create('{$uri}', '{$method}'));";
+            $this->line($this->color("Converting to route call: {$method} {$uri}", 'YELLOW'));
+        }
+
+        $this->info($this->color("Running baseline measurement...", 'CYAN'));
+
+        $result = $this->profileManager->baseline(function () use ($code) {
+            return $this->executeWithFullAnalysis($code, false);
+        });
+
+        $this->displayMeasurement("BASELINE", $result);
+    }
+
+    protected function runFix(string $fixName): void
+    {
+        if (empty($this->codeBuffer)) {
+            $this->error("No code to profile. Write some code first.");
+            $this->line("Example: >>> GET /engine-metrics/complex-join");
+            return;
+        }
+
+        $code = implode("\n", $this->codeBuffer);
+
+        // إذا كان الكود يبدأ بـ GET / أو POST /، حوله إلى route
+        if (preg_match('/^(GET|POST|PUT|DELETE)\s+(\/\S+)/', $code, $matches)) {
+            $method = $matches[1];
+            $uri = $matches[2];
+            $code = "Route::dispatch(Request::create('{$uri}', '{$method}'));";
+            $this->line($this->color("Converting to route call: {$method} {$uri}", 'YELLOW'));
+        }
+
+        $this->info($this->color("Running fix: {$fixName}", 'CYAN'));
+
+        $result = $this->profileManager->afterFix($fixName, function () use ($code) {
+            return $this->executeWithFullAnalysis($code, true);
+        });
+
+        $this->displayMeasurement("FIX: {$fixName}", $result);
+
+        $comparison = $this->profileManager->compare();
+        if (!empty($comparison)) {
+            $this->displayDiff(end($comparison));
+        }
+    }
+
+    protected function executeWithFullAnalysis(string $code, bool $silent = false): array
+    {
+        $this->resetState();
+
+        if ($this->option('memory')) {
+            $this->takeMemorySnapshot('before_execution');
+        }
+
+        $this->enableFunctionTracing((int)($this->option('level') ?? 3), $this->option('details'));
+        $this->enableQueryListener();
+        $this->enableLoopDetector();
+        $this->enableCollectionInterceptor();
+
+        $startTime = microtime(true);
+        $startMemory = memory_get_usage();
+        $startCpu = getrusage();
+
+        $isRoute = $this->option('route');
+        $params = json_decode($this->option('params') ?? '{}', true);
+
+        try {
+            if ($isRoute) {
+                $result = $this->executeRoute($code, $params);
+            } else {
+                $result = eval("return {$code};");
+            }
+        } catch (\Throwable $e) {
+            $result = $e;
+        }
+
+        $endTime = microtime(true);
+        $endMemory = memory_get_usage();
+        $endCpu = getrusage();
+
+        $duration = round(($endTime - $startTime) * 1000, 2);
+        $memoryUsed = round(($endMemory - $startMemory) / 1024, 2);
+        $cpuTime = $this->calculateCpuTime($startCpu, $endCpu);
+
+        $this->detectNPlusOne();
+        $this->analyzeLoops();
+
+        if ($this->option('memory')) {
+            $this->takeMemorySnapshot('after_execution');
+        }
+
+        if (!$silent) {
+            if (!$this->option('warnings') && !$this->option('queries') && !$this->option('summary')) {
+                $this->displayResult($result);
+            }
+
+            if ($this->option('tree')) {
+                $this->displayCallTree((int)($this->option('level') ?? 3));
+            }
+
+            if ($this->option('warnings') || (!$this->option('tree') && !$this->option('queries') && !$this->option('summary'))) {
+                $this->displayWarnings();
+            }
+
+            if ($this->option('queries') || (!$this->option('tree') && !$this->option('warnings') && !$this->option('summary'))) {
+                $this->displayQueries();
+            }
+
+            if ($this->option('memory')) {
+                $this->displayMemoryAnalysis();
+            }
+
+            if ($this->option('summary') || (!$this->option('tree') && !$this->option('warnings') && !$this->option('queries'))) {
+                $this->displaySummary($duration, $memoryUsed, $cpuTime);
+            }
+        }
+
+        return [
+            'time_ms' => $duration,
+            'memory_kb' => $memoryUsed,
+            'memory_mb' => round($memoryUsed / 1024, 2),
+            'queries' => count($this->queries),
+            'query_time_ms' => round(array_sum(array_column($this->queries, 'time')), 2),
+            'result' => $result,
+            'warnings' => $this->warnings,
+            'cpu_time_ms' => $cpuTime,
+        ];
+    }
+
+    protected function executeAndTrace(string $code): void
+    {
+        $this->executeWithFullAnalysis($code, false);
+    }
+
+    protected function executeRoute(string $uri, array $params = [])
+    {
+        $this->line($this->color("Executing route: {$uri}", 'CYAN'));
+
+        $query = http_build_query($params);
+        $fullUri = $uri . ($query ? '?' . $query : '');
+
+        $request = Request::create($fullUri, 'GET');
+        $request->server->set('HTTP_HOST', 'shadow.local');
+        $request->server->set('SERVER_NAME', 'shadow.local');
+
+        $kernel = app(\Illuminate\Contracts\Http\Kernel::class);
+        $response = $kernel->handle($request);
+        $kernel->terminate($request, $response);
+
+        return json_decode($response->getContent(), true) ?? $response->getContent();
+    }
+
+    protected function resetState(): void
+    {
+        $this->callTree = [];
+        $this->currentBranch = [];
+        $this->callId = 0;
+        $this->warnings = [];
+        $this->queries = [];
+        $this->loopAnalysis = [];
+    }
+
+    protected function enableFunctionTracing(int $maxDepth, bool $showDetails): void
+    {
+        $tracer = $this;
+        $depth = 0;
+        $startTimes = [];
+        $startMemories = [];
+
+        set_error_handler(function ($errno, $errstr, $errfile, $errline) use ($tracer, &$depth, &$startTimes, &$startMemories, $maxDepth, $showDetails) {
+
+            $backtrace = debug_backtrace(DEBUG_BACKTRACE_PROVIDE_OBJECT, 5);
+
+            if (isset($backtrace[2]['function']) && $depth < $maxDepth) {
+                $function = $backtrace[2]['function'];
+                $class = $backtrace[2]['class'] ?? '';
+                $fullName = $class ? $class . '::' . $function : $function;
+
+                if (
+                    strpos($fullName, 'TraceCommand') !== false ||
+                    strpos($fullName, 'Illuminate\Console') !== false ||
+                    strpos($fullName, 'Psy\Shell') !== false
+                ) {
+                    return false;
+                }
+
+                $callId = $tracer->callId++;
+
+                $call = [
+                    'id' => $callId,
+                    'name' => $fullName,
+                    'class' => $class,
+                    'function' => $function,
+                    'file' => $backtrace[2]['file'] ?? 'unknown',
+                    'line' => $backtrace[2]['line'] ?? 0,
+                    'depth' => $depth,
+                    'parent_id' => end($tracer->currentBranch) ? $tracer->currentBranch[count($tracer->currentBranch) - 1] : null,
+                ];
+
+                if ($showDetails && isset($backtrace[2]['args'])) {
+                    $call['args'] = $tracer->sanitizeArgs($backtrace[2]['args']);
+                }
+
+                $tracer->callTree[] = $call;
+                $tracer->currentBranch[] = $callId;
+                $startTimes[$callId] = microtime(true);
+                $startMemories[$callId] = memory_get_usage();
+                $depth++;
+            }
+
+            return false;
+        });
+
+        register_shutdown_function(function () use ($tracer, &$depth, &$startTimes, &$startMemories) {
+            if (!empty($tracer->currentBranch)) {
+                $callId = array_pop($tracer->currentBranch);
+                $endTime = microtime(true);
+                $endMemory = memory_get_usage();
+                $depth--;
+
+                foreach ($tracer->callTree as &$call) {
+                    if ($call['id'] === $callId) {
+                        $call['duration_ms'] = round(($endTime - $startTimes[$callId]) * 1000, 2);
+                        $call['memory_kb'] = round(($endMemory - $startMemories[$callId]) / 1024, 2);
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
+    protected function enableQueryListener(): void
+    {
+        DB::listen(function ($query) {
+            $this->queries[] = [
+                'sql' => $query->sql,
+                'time' => $query->time,
+                'bindings' => $query->bindings,
+                'caller' => $this->getCaller(),
+            ];
+
+            $this->callTree[] = [
+                'id' => $this->callId++,
+                'name' => 'SQL',
+                'sql' => $query->sql,
+                'duration_ms' => $query->time,
+                'depth' => count($this->currentBranch),
+                'parent_id' => end($this->currentBranch) ?: null,
+            ];
+        });
+    }
+
+    protected function enableLoopDetector(): void
+    {
+        $tracer = $this;
+        $lastTime = null;
+        $lastMemory = null;
+
+        register_tick_function(function () use ($tracer, &$lastTime, &$lastMemory) {
+            $now = microtime(true);
+            $currentMemory = memory_get_usage();
+
+            if ($lastTime !== null) {
+                $duration = ($now - $lastTime) * 1000;
+                $memoryDelta = ($currentMemory - $lastMemory) / 1024;
+
+                if ($duration > 10 || $memoryDelta > 1024) {
+                    $backtrace = debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS, 5);
+                    $location = $tracer->findLoopLocation($backtrace);
+
+                    if ($location) {
+                        if (!isset($tracer->loopAnalysis[$location])) {
+                            $tracer->loopAnalysis[$location] = [
+                                'count' => 0,
+                                'total_duration' => 0,
+                                'max_duration' => 0,
+                                'total_memory' => 0,
+                                'max_memory' => 0,
+                            ];
+                        }
+
+                        $tracer->loopAnalysis[$location]['count']++;
+                        $tracer->loopAnalysis[$location]['total_duration'] += $duration;
+                        $tracer->loopAnalysis[$location]['max_duration'] = max($tracer->loopAnalysis[$location]['max_duration'], $duration);
+                        $tracer->loopAnalysis[$location]['total_memory'] += $memoryDelta;
+                        $tracer->loopAnalysis[$location]['max_memory'] = max($tracer->loopAnalysis[$location]['max_memory'], $memoryDelta);
+                    }
+                }
+            }
+
+            $lastTime = $now;
+            $lastMemory = $currentMemory;
+        });
+
+        declare(ticks=100);
+    }
+
+    protected function enableCollectionInterceptor(): void
+    {
+        Collection::macro('__construct', function ($items = []) {
+            $size = count($items);
+            if ($size > 1000) {
+                $this->warnings[] = [
+                    'type' => 'LARGE_COLLECTION',
+                    'severity' => $size > 10000 ? 'HIGH' : 'MEDIUM',
+                    'size' => $size,
+                    'memory_kb' => round(strlen(serialize($items)) / 1024, 2),
+                    'suggestion' => $size > 10000 ? 'Use chunk() or cursor()' : 'Consider pagination',
+                    'caller' => $this->getCaller(),
+                ];
+            }
+            return new \Illuminate\Support\Collection($items);
+        });
+    }
+
+    protected function detectNPlusOne(): void
+    {
+        $patterns = [];
+
+        foreach ($this->queries as $query) {
+            $pattern = $this->normalizeQueryPattern($query['sql']);
+
+            if (!isset($patterns[$pattern])) {
+                $patterns[$pattern] = [
+                    'count' => 0,
+                    'total_time' => 0,
+                    'example' => $query['sql'],
+                ];
+            }
+
+            $patterns[$pattern]['count']++;
+            $patterns[$pattern]['total_time'] += $query['time'];
+        }
+
+        foreach ($patterns as $pattern => $data) {
+            if ($data['count'] > 5) {
+                $this->warnings[] = [
+                    'type' => 'N_PLUS_ONE',
+                    'severity' => $data['count'] > 50 ? 'CRITICAL' : 'HIGH',
+                    'count' => $data['count'],
+                    'total_time_ms' => round($data['total_time'], 2),
+                    'pattern' => $pattern,
+                    'example' => $data['example'],
+                    'suggestion' => 'Use with() for eager loading',
+                ];
+            }
+        }
+    }
+
+    protected function analyzeLoops(): void
+    {
+        foreach ($this->loopAnalysis as $location => $data) {
+            if ($data['count'] > 100 || $data['max_duration'] > 50 || $data['max_memory'] > 10240) {
+                $this->warnings[] = [
+                    'type' => 'EXPENSIVE_LOOP',
+                    'severity' => $data['count'] > 1000 ? 'CRITICAL' : 'HIGH',
+                    'location' => $location,
+                    'iterations' => $data['count'],
+                    'total_duration_ms' => round($data['total_duration'], 2),
+                    'max_duration_ms' => round($data['max_duration'], 2),
+                    'total_memory_kb' => round($data['total_memory'], 2),
+                    'suggestion' => $this->getLoopSuggestion($data),
+                ];
+            }
+        }
+    }
+
+    protected function findLoopLocation(array $backtrace): ?string
+    {
+        foreach ($backtrace as $frame) {
+            if (isset($frame['file']) && isset($frame['line'])) {
+                if (
+                    strpos($frame['file'], 'vendor') === false &&
+                    strpos($frame['file'], 'TraceCommand') === false
+                ) {
+                    return basename($frame['file']) . ':' . $frame['line'];
+                }
+            }
+        }
+        return null;
+    }
+
+    protected function getLoopSuggestion(array $data): string
+    {
+        if ($data['max_memory'] > 10240) {
+            return 'Move variable declarations outside loop or use unset()';
+        }
+        if ($data['max_duration'] > 100) {
+            return 'Move DB queries or API calls outside loop';
+        }
+        if ($data['count'] > 1000) {
+            return 'Use batch processing or chunk() instead';
+        }
+        return 'Consider optimizing loop logic';
+    }
+
+    protected function normalizeQueryPattern(string $sql): string
+    {
+        $pattern = preg_replace('/\?/', '*', $sql);
+        $pattern = preg_replace('/=\s*\d+/', '=*', $pattern);
+        $pattern = preg_replace("/'[^']+'/", "'*'", $pattern);
+        $pattern = preg_replace('/\d+/', '*', $pattern);
+        return $pattern;
+    }
+
+    protected function calculateCpuTime($start, $end): float
+    {
+        $userTime = ($end['ru_utime.tv_sec'] - $start['ru_utime.tv_sec']) * 1000;
+        $userTime += ($end['ru_utime.tv_usec'] - $start['ru_utime.tv_usec']) / 1000;
+
+        $systemTime = ($end['ru_stime.tv_sec'] - $start['ru_stime.tv_sec']) * 1000;
+        $systemTime += ($end['ru_stime.tv_usec'] - $start['ru_stime.tv_usec']) / 1000;
+
+        return round($userTime + $systemTime, 2);
+    }
+
+    protected function sanitizeArgs(array $args): array
+    {
+        $result = [];
+        foreach ($args as $arg) {
+            if (is_object($arg)) {
+                $result[] = 'Object(' . get_class($arg) . ')';
+            } elseif (is_array($arg)) {
+                $result[] = 'Array[' . count($arg) . ']';
+            } elseif (is_string($arg)) {
+                $result[] = strlen($arg) > 50 ? substr($arg, 0, 50) . '...' : $arg;
+            } else {
+                $result[] = $arg;
+            }
+        }
+        return $result;
+    }
+
+    protected function getCaller(): string
+    {
+        $trace = debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS, 6);
+
+        for ($i = 3; $i < count($trace); $i++) {
+            if (
+                isset($trace[$i]['file']) &&
+                strpos($trace[$i]['file'], 'vendor') === false &&
+                strpos($trace[$i]['file'], 'TraceCommand') === false
+            ) {
+                return basename($trace[$i]['file']) . ':' . ($trace[$i]['line'] ?? 0);
+            }
+        }
+
+        return 'unknown';
+    }
+
+    protected function takeMemorySnapshot(string $label): void
+    {
+        $this->memorySnapshots[] = [
+            'label' => $label,
+            'time' => microtime(true),
+            'memory_usage' => memory_get_usage(true),
+            'memory_peak' => memory_get_peak_usage(true),
+        ];
+    }
+
+    protected function displayMemoryAnalysis(): void
+    {
+        if (count($this->memorySnapshots) < 2) {
+            return;
+        }
+
+        $first = $this->memorySnapshots[0];
+        $last = $this->memorySnapshots[count($this->memorySnapshots) - 1];
+        $delta = $last['memory_usage'] - $first['memory_usage'];
+        $deltaMb = round($delta / 1024 / 1024, 2);
+
+        $this->newLine();
+        $this->line($this->color(str_repeat('=', 80), 'CYAN'));
+        $this->line($this->color("DEEP MEMORY ANALYSIS", 'WHITE', 'BOLD'));
+        $this->line($this->color(str_repeat('=', 80), 'CYAN'));
+
+        $this->line("Baseline: " . $this->color(round($first['memory_usage'] / 1024, 2) . " KB", 'DIM'));
+        $this->line("Final:    " . $this->color(round($last['memory_usage'] / 1024, 2) . " KB", 'DIM'));
+        $this->line("Peak:     " . $this->color(round($last['memory_peak'] / 1024, 2) . " KB", 'DIM'));
+        $this->line("Delta:    " . $this->color($deltaMb . " MB", $delta > 0 ? 'LIGHT_RED' : 'LIGHT_GREEN'));
+
+        if ($delta > 10 * 1024 * 1024) {
+            $this->newLine();
+            $this->error($this->color("[MEMORY LEAK DETECTED]", 'LIGHT_RED', 'BOLD'));
+            $this->line($this->color("  " . round($delta / 1024 / 1024, 2) . " MB not released", 'YELLOW'));
+            $this->line($this->color("  -> Suggestion: Check for static variables, circular references, or unclosed resources", 'DIM'));
+        }
+
+        $this->newLine();
+    }
+
+    protected function displayResult($result): void
+    {
+        $this->newLine();
+        $this->line($this->color(str_repeat('-', 80), 'CYAN'));
+        $this->line($this->color("RESULT", 'WHITE', 'BOLD'));
+        $this->line($this->color(str_repeat('-', 80), 'CYAN'));
+
+        if ($result instanceof \Throwable) {
+            $this->error($this->color("Exception: " . $result->getMessage(), 'LIGHT_RED'));
+            $this->line($this->color($result->getTraceAsString(), 'DIM'));
+        } else {
+            $output = print_r($result, true);
+            if (strlen($output) > 2000) {
+                $output = substr($output, 0, 2000) . "\n... (truncated)";
+            }
+            $this->line($this->color($output, 'DIM'));
+        }
+    }
+
+    protected function displayCallTree(int $maxDepth): void
+    {
+        $this->newLine();
+        $this->line($this->color(str_repeat('=', 80), 'CYAN'));
+        $this->line($this->color("CALL TREE (Max Depth: {$maxDepth})", 'WHITE', 'BOLD'));
+        $this->line($this->color(str_repeat('=', 80), 'CYAN'));
+
+        $roots = array_filter($this->callTree, fn($c) => $c['parent_id'] === null && ($c['depth'] ?? 0) === 0);
+
+        if (empty($roots)) {
+            $this->line($this->color("No call tree captured", 'DIM'));
+            return;
+        }
+
+        foreach ($roots as $root) {
+            $this->printTreeNode($root, 0, $maxDepth);
+        }
+    }
+
+    protected function printTreeNode(array $node, int $currentDepth, int $maxDepth): void
+    {
+        if ($currentDepth >= $maxDepth) {
+            return;
+        }
+
+        $indent = str_repeat('  ', $currentDepth);
+        $branch = $currentDepth > 0 ? $this->color('├─ ', 'CYAN') : '';
+
+        if ($node['name'] === 'SQL') {
+            $sql = substr($node['sql'], 0, 60);
+            $line = sprintf(
+                "%s%s%s %s",
+                $indent,
+                $branch,
+                $this->color("[SQL]", 'BLUE'),
+                $this->color($sql . " (" . $node['duration_ms'] . " ms)", 'DIM')
+            );
+        } else {
+            $duration = $node['duration_ms'] ?? 0;
+            $memory = $node['memory_kb'] ?? 0;
+
+            $durationColor = $duration > 100 ? 'LIGHT_RED' : ($duration > 10 ? 'YELLOW' : 'LIGHT_GREEN');
+            $durationStr = $this->color("{$duration} ms", $durationColor);
+            $memoryStr = $this->color("{$memory} KB", 'LIGHT_GREEN');
+
+            $line = sprintf(
+                "%s%s%s %s",
+                $indent,
+                $branch,
+                $this->color($node['name'], 'WHITE'),
+                $this->color("[{$durationStr}, {$memoryStr}]", 'DIM')
+            );
+
+            if (isset($node['args']) && !empty($node['args'])) {
+                $args = implode(', ', array_slice($node['args'], 0, 3));
+                if (count($node['args']) > 3) {
+                    $args .= ', ...';
+                }
+                $line .= "\n" . $indent . $this->color("     args: ", 'DIM') . $this->color($args, 'YELLOW');
+            }
+        }
+
+        $this->line($line);
+
+        $children = array_filter($this->callTree, fn($c) => ($c['parent_id'] ?? null) === $node['id']);
+
+        foreach ($children as $child) {
+            $this->printTreeNode($child, $currentDepth + 1, $maxDepth);
+        }
+    }
+
+    protected function displayWarnings(): void
+    {
+        if (empty($this->warnings)) {
+            return;
+        }
+
+        $this->newLine();
+        $this->line($this->color(str_repeat('=', 80), 'YELLOW'));
+        $this->line($this->color("RESOURCE THIEF WARNINGS", 'LIGHT_RED', 'BOLD'));
+        $this->line($this->color(str_repeat('=', 80), 'YELLOW'));
+
+        foreach ($this->warnings as $warning) {
+            $severity = $warning['severity'] ?? 'MEDIUM';
+            $type = $warning['type'];
+
+            if ($severity === 'CRITICAL') {
+                $this->error($this->color("[CRITICAL] {$type}", 'LIGHT_RED', 'BOLD'));
+            } elseif ($severity === 'HIGH') {
+                $this->error($this->color("[HIGH] {$type}", 'LIGHT_RED'));
+            } else {
+                $this->warn($this->color("[MEDIUM] {$type}", 'YELLOW'));
+            }
+
+            foreach ($warning as $key => $value) {
+                if (in_array($key, ['type', 'severity', 'suggestion'])) {
+                    continue;
+                }
+                $this->line($this->color("  {$key}: ", 'DIM') . $this->color($value, 'WHITE'));
+            }
+
+            if (isset($warning['suggestion'])) {
+                $this->line($this->color("  -> Fix: " . $warning['suggestion'], 'GREEN'));
+            }
+
+            $this->line("");
+        }
+    }
+
+    protected function displayQueries(): void
+    {
+        if (empty($this->queries)) {
+            return;
+        }
+
+        $totalTime = array_sum(array_column($this->queries, 'time'));
+
+        $this->newLine();
+        $this->line($this->color(str_repeat('-', 80), 'CYAN'));
+        $this->line($this->color("SQL QUERIES", 'WHITE', 'BOLD'));
+        $this->line($this->color(str_repeat('-', 80), 'CYAN'));
+
+        $this->line(sprintf(
+            "Total: %s queries | Total time: %s ms",
+            $this->color(count($this->queries), 'BLUE'),
+            $this->color(round($totalTime, 2), 'LIGHT_GREEN')
+        ));
+        $this->line("");
+
+        $slowQueries = array_filter($this->queries, fn($q) => $q['time'] > 100);
+
+        if (!empty($slowQueries)) {
+            $this->line($this->color("SLOW QUERIES (>100ms):", 'YELLOW', 'BOLD'));
+            foreach (array_slice($slowQueries, 0, 5) as $query) {
+                $this->line(sprintf(
+                    "  %s %s",
+                    $this->color("[{$query['time']} ms]", 'LIGHT_RED'),
+                    $this->color($query['sql'], 'BLUE')
+                ));
+                if (isset($query['caller'])) {
+                    $this->line($this->color("    at {$query['caller']}", 'DIM'));
+                }
+            }
+            if (count($slowQueries) > 5) {
+                $this->line($this->color("  ... and " . (count($slowQueries) - 5) . " more", 'DIM'));
+            }
+            $this->line("");
+        }
+
+        $normalQueries = array_filter($this->queries, fn($q) => $q['time'] <= 100);
+        if (!empty($normalQueries) && count($normalQueries) <= 10) {
+            $this->line($this->color("ALL QUERIES:", 'DIM'));
+            foreach ($normalQueries as $query) {
+                $this->line(sprintf(
+                    "  %s %s",
+                    $this->color("[{$query['time']} ms]", 'DIM'),
+                    $this->color($query['sql'], 'DIM')
+                ));
+            }
+        } elseif (!empty($normalQueries)) {
+            $this->line($this->color("(" . count($normalQueries) . " fast queries not shown)", 'DIM'));
+        }
+    }
+
+    protected function displaySummary(float $duration, float $memoryUsed, float $cpuTime): void
+    {
+        $totalCalls = count(array_filter($this->callTree, fn($c) => $c['name'] !== 'SQL'));
+        $totalQueries = count($this->queries);
+        $totalWarnings = count($this->warnings);
+
+        $durationColor = $duration > 500 ? 'LIGHT_RED' : ($duration > 100 ? 'YELLOW' : 'LIGHT_GREEN');
+        $memoryColor = $memoryUsed > 50000 ? 'LIGHT_RED' : ($memoryUsed > 10000 ? 'YELLOW' : 'LIGHT_GREEN');
+
+        $this->newLine();
+        $this->line($this->color(str_repeat('=', 80), 'CYAN'));
+        $this->line($this->color("SUMMARY", 'WHITE', 'BOLD'));
+        $this->line($this->color(str_repeat('=', 80), 'CYAN'));
+
+        $this->line("Wall Time:   " . $this->color("{$duration} ms", $durationColor));
+        $this->line("CPU Time:    " . $this->color("{$cpuTime} ms", $durationColor));
+        $this->line("Memory:      " . $this->color("{$memoryUsed} KB (" . round($memoryUsed / 1024, 2) . " MB)", $memoryColor));
+        $this->line("Calls:       " . $this->color($totalCalls, 'WHITE'));
+        $this->line("Queries:     " . $this->color($totalQueries, 'BLUE'));
+        $this->line("Warnings:    " . ($totalWarnings > 0 ? $this->color($totalWarnings, 'LIGHT_RED') : $this->color($totalWarnings, 'GREEN')));
+
+        $criticalCount = count(array_filter($this->warnings, fn($w) => ($w['severity'] ?? '') === 'CRITICAL'));
+        $highCount = count(array_filter($this->warnings, fn($w) => ($w['severity'] ?? '') === 'HIGH'));
+
+        if ($criticalCount > 0 || $highCount > 0) {
+            $this->line($this->color("CRITICAL: {$criticalCount} | HIGH: {$highCount}", 'LIGHT_RED', 'BOLD'));
+        }
+
+        $this->newLine();
+    }
+
+    protected function displayMeasurement(string $title, array $data): void
+    {
+        $this->newLine();
+        $this->line($this->color(str_repeat('-', 60), 'CYAN'));
+        $this->line($this->color($title, 'WHITE', 'BOLD'));
+        $this->line($this->color(str_repeat('-', 60), 'CYAN'));
+
+        $time = $data['time_ms'] ?? 0;
+        $memory = $data['memory_kb'] ?? 0;
+        $memoryMb = $data['memory_mb'] ?? 0;
+        $queries = $data['queries'] ?? 0;
+        $queryTime = $data['query_time_ms'] ?? 0;
+
+        $this->line("Time:    " . $this->color($time . " ms", 'LIGHT_GREEN'));
+        $this->line("Memory:  " . $this->color($memory . " KB (" . $memoryMb . " MB)", 'LIGHT_GREEN'));
+        $this->line("Queries: " . $this->color($queries, 'BLUE'));
+        $this->line("Query Time: " . $this->color($queryTime . " ms", 'LIGHT_GREEN'));
+        $this->newLine();
+    }
+
+    protected function displayDiff(?array $diff): void
+    {
+        if (!$diff || empty($diff)) {
+            $this->line($this->color("No changes recorded yet. Run baseline first.", 'YELLOW'));
+            return;
+        }
+
+        $timeMs = $diff['time_change_ms'] ?? 0;
+        $timePercent = $diff['time_percent'] ?? 0;
+        $memoryKb = $diff['memory_change_kb'] ?? 0;
+        $memoryPercent = $diff['memory_percent'] ?? 0;
+        $queries = $diff['query_change'] ?? 0;
+
+        $timeColor = $timeMs <= 0 ? 'GREEN' : 'LIGHT_RED';
+        $memoryColor = $memoryKb <= 0 ? 'GREEN' : 'LIGHT_RED';
+        $queryColor = $queries <= 0 ? 'GREEN' : 'LIGHT_RED';
+
+        $this->line($this->color("CHANGE FROM BASELINE:", 'YELLOW'));
+
+        $this->line(sprintf(
+            "  Time:   %s ms (%s%%)",
+            $this->color(sprintf("%+.2f", $timeMs), $timeColor),
+            $this->color(sprintf("%+.1f", $timePercent), $timeColor)
+        ));
+
+        $this->line(sprintf(
+            "  Memory: %s KB (%s%%)",
+            $this->color(sprintf("%+.2f", $memoryKb), $memoryColor),
+            $this->color(sprintf("%+.1f", $memoryPercent), $memoryColor)
+        ));
+
+        $this->line(sprintf(
+            "  Queries: %s",
+            $this->color(sprintf("%+d", $queries), $queryColor)
+        ));
+        $this->line("");
+    }
+
+    protected function displayProfileComparison(): void
+    {
+        if (!$this->profileManager) {
+            $this->error("No active profile");
+            return;
+        }
+
+        $comparison = $this->profileManager->compare();
+
+        if (empty($comparison)) {
+            $this->info("No fixes recorded yet");
+            return;
+        }
+
+        $this->newLine();
+        $this->line($this->color(str_repeat('=', 80), 'CYAN'));
+        $this->line($this->color("PROFILE COMPARISON", 'WHITE', 'BOLD'));
+        $this->line($this->color(str_repeat('=', 80), 'CYAN'));
+
+        foreach ($comparison as $i => $comp) {
+            $statusColor = match ($comp['status']) {
+                'EXCELLENT' => 'GREEN',
+                'GOOD' => 'GREEN',
+                'MINOR' => 'YELLOW',
+                'REGRESSION' => 'LIGHT_RED',
+                default => 'WHITE',
+            };
+
+            $this->line(sprintf("%d. %s", $i + 1, $comp['fix']));
+            $this->line(sprintf(
+                "   Time:   %+.2f ms (%+.1f%%)",
+                $comp['time_change_ms'],
+                $comp['time_percent']
+            ));
+            $this->line(sprintf(
+                "   Memory: %+.2f KB (%+.1f%%)",
+                $comp['memory_change_kb'],
+                $comp['memory_percent']
+            ));
+            $this->line(sprintf("   Queries: %+d", $comp['query_change']));
+            $this->line(sprintf("   Status: %s", $this->color($comp['status'], $statusColor)));
+            $this->line("");
+        }
+    }
+
+    protected function displayProfileReport(): void
+    {
+        if (!$this->profileManager) {
+            $this->error("No active profile");
+            return;
+        }
+
+        $this->newLine();
+        $this->line($this->profileManager->generateReport());
+    }
+
+    protected function loadAndDisplayProfile(string $name): void
+    {
+        $data = \ResourceThief\Profiling\ProfileManager::load($name);
+
+        if (!$data) {
+            $this->error("Profile not found: {$name}");
+            return;
+        }
+
+        $this->newLine();
+        $this->line($this->color(str_repeat('=', 80), 'CYAN'));
+        $this->line($this->color("LOADED PROFILE: {$data['profile_id']}", 'WHITE', 'BOLD'));
+        $this->line($this->color("Created: {$data['created_at']}", 'DIM'));
+        $this->line($this->color(str_repeat('=', 80), 'CYAN'));
+        $this->line("");
+
+        $this->line($this->color("BASELINE", 'YELLOW', 'BOLD'));
+        $this->line($this->color(str_repeat('-', 40), 'CYAN'));
+        $bl = $data['baseline'];
+        $this->line("  Time:    " . $this->color($bl['time_ms'] . " ms", 'LIGHT_GREEN'));
+        $this->line("  Memory:  " . $this->color($bl['memory_kb'] . " KB", 'LIGHT_GREEN'));
+        $this->line("  Queries: " . $this->color($bl['queries'], 'BLUE'));
+        $this->line("");
+
+        if (!empty($data['improvements'])) {
+            $this->line($this->color("IMPROVEMENTS", 'YELLOW', 'BOLD'));
+            $this->line($this->color(str_repeat('-', 40), 'CYAN'));
+            foreach ($data['improvements'] as $i => $imp) {
+                $diff = $imp['diff'];
+                $this->line(sprintf("  %d. %s", $i + 1, $imp['name']));
+                $this->line(sprintf(
+                    "     Time:   %+.2f ms (%+.1f%%)",
+                    $diff['time_ms'],
+                    $diff['time_percent']
+                ));
+                $this->line(sprintf(
+                    "     Memory: %+.2f KB (%+.1f%%)",
+                    $diff['memory_kb'],
+                    $diff['memory_percent']
+                ));
+                $this->line("");
+            }
+        }
+
+        if ($data['final_improvement']) {
+            $final = $data['final_improvement'];
+            $this->line($this->color("FINAL RESULT", 'GREEN', 'BOLD'));
+            $this->line($this->color(str_repeat('-', 40), 'CYAN'));
+            $this->line(sprintf(
+                "  Time improvement:   %.1f%% (%s ms)",
+                abs($final['time_percent']),
+                $final['time_ms'] < 0 ? '-' . abs($final['time_ms']) : '+' . $final['time_ms']
+            ));
+            $this->line(sprintf(
+                "  Memory improvement: %.1f%% (%s KB)",
+                abs($final['memory_percent']),
+                $final['memory_kb'] < 0 ? '-' . abs($final['memory_kb']) : '+' . $final['memory_kb']
+            ));
+        }
+
+        $this->newLine();
+    }
+
+    protected function displayHelp(): void
+    {
+        $this->newLine();
+        $this->line($this->color("RESOURCE THIEF DETECTOR - COMPLETE SUITE", 'CYAN', 'BOLD'));
+        $this->line($this->color(str_repeat('=', 50), 'CYAN'));
+        $this->line("");
+        $this->line($this->color("NORMAL MODE:", 'YELLOW', 'BOLD'));
+        $this->line("  trace \"DB::table('users')->get()\"");
+        $this->line("  trace \"User::find(1)\" --tree --level=5");
+        $this->line("  trace --route /api/users");
+        $this->line("  trace \"DB::table('users')->get()\" --memory");
+        $this->line("");
+        $this->line($this->color("PROFILE MODE:", 'YELLOW', 'BOLD'));
+        $this->line("  trace --profile --profile-name=my_test --code=\"DB::table('users')->get()\"");
+        $this->line("  trace --profile-name=my_test --fix=\"add index\" --code=\"...\"");
+        $this->line("  trace --profile-name=my_test --compare");
+        $this->line("  trace --profile-name=my_test --report --save");
+        $this->line("  trace --load=my_test");
+        $this->line("");
+        $this->line($this->color("INTERACTIVE MODE:", 'YELLOW', 'BOLD'));
+        $this->line("  trace");
+        $this->line("  >>> profile my_test");
+        $this->line("  >>> DB::table('users')->get()");
+        $this->line("  >>> baseline");
+        $this->line("  >>> fix \"add index\"");
+        $this->line("  >>> compare");
+        $this->line("  >>> report");
+        $this->line("  >>> save");
+        $this->line("  >>> exit");
+        $this->line("");
+        $this->line($this->color("OPTIONS:", 'YELLOW', 'BOLD'));
+        $this->line("  --tree, -t       Display call tree");
+        $this->line("  --level=N, -l=N  Tree depth (default: 3)");
+        $this->line("  --details, -d    Show arguments");
+        $this->line("  --warnings, -w   Show warnings only");
+        $this->line("  --queries, -q    Show SQL only");
+        $this->line("  --summary, -s    Show summary only");
+        $this->line("  --memory         Deep memory analysis");
+        $this->line("  --route          Execute as route");
+        $this->line("  --params=JSON    Route parameters");
+        $this->line("  --profile        Profile mode");
+        $this->line("  --profile-name=N Profile name");
+        $this->line("  --fix=NAME       Apply fix");
+        $this->line("  --compare        Compare fixes");
+        $this->line("  --report         Generate report");
+        $this->line("  --save           Save profile");
+        $this->line("  --load=NAME      Load profile");
+        $this->line("  --push           Save checkpoint");
+        $this->line("  --pop            Rollback checkpoint");
+        $this->line("");
+    }
+
+    protected function color(string $text, string $color, ?string $style = null): string
+    {
+        $colors = [
+            'BLACK' => '0;30',
+            'DARK_GRAY' => '1;30',
+            'RED' => '0;31',
+            'LIGHT_RED' => '1;31',
+            'GREEN' => '0;32',
+            'LIGHT_GREEN' => '1;32',
+            'BROWN' => '0;33',
+            'YELLOW' => '1;33',
+            'BLUE' => '0;34',
+            'LIGHT_BLUE' => '1;34',
+            'PURPLE' => '0;35',
+            'LIGHT_PURPLE' => '1;35',
+            'CYAN' => '0;36',
+            'LIGHT_CYAN' => '1;36',
+            'LIGHT_GRAY' => '0;37',
+            'WHITE' => '1;37',
+        ];
+
+        $styles = [
+            'RESET' => '0',
+            'BOLD' => '1',
+            'DIM' => '2',
+            'UNDERLINE' => '4',
+            'BLINK' => '5',
+            'REVERSE' => '7',
+            'HIDDEN' => '8',
+        ];
+
+        $codes = [];
+
+        if ($style && isset($styles[$style])) {
+            $codes[] = $styles[$style];
+        }
+
+        if ($color && isset($colors[$color])) {
+            $codes[] = $colors[$color];
+        }
+
+        if (empty($codes)) {
+            return $text;
+        }
+
+        return "\033[" . implode(';', $codes) . "m{$text}\033[0m";
+    }
+}

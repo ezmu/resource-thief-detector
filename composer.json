@@ -1,0 +1,24 @@
+{
+    "name": "resource-thief/resource-thief-detector",
+    "description": "Resource Thief Detector - Performance profiling suite for Laravel",
+    "type": "library",
+    "license": "MIT",
+    "version": "1.0.0",
+    "require": {
+        "php": "^8.0",
+        "laravel/framework": "^9.0|^10.0|^11.0|^12.0"    },
+    "autoload": {
+        "psr-4": {
+            "ResourceThief\\": "src/"
+        }
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "ResourceThief\\ResourceThiefServiceProvider"
+            ]
+        }
+    },
+    "minimum-stability": "dev",
+    "prefer-stable": true
+}

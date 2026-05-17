@@ -1,5 +1,9 @@
 
-# Resource Thief Detector (RTD)
+# 🕵 Resource Thief Detector (RTD)
+
+[![Latest Version on Packagist](https://img.shields.io/packagist/v/ezmu/resource-thief-detector.svg?style=flat-square)](https://packagist.org/packages/ezmu/resource-thief-detector)
+[![Total Downloads](https://img.shields.io/packagist/dt/ezmu/resource-thief-detector.svg?style=flat-square)](https://packagist.org/packages/ezmu/resource-thief-detector)
+[![Software License](https://img.shields.io/badge/license-MIT-brightgreen.svg?style=flat-square)](LICENSE.md)
 
 Modern software is bloated. Frameworks are fast, but lazy developer habits like N+1 queries, unindexed Lookups, and massive memory hydration loops are stealing your hardware resources. 
 

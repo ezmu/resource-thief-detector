@@ -1,5 +1,7 @@
 <?php
 
+declare(ticks=1);
+
 namespace ResourceThief\Console;
 
 use Illuminate\Console\Command;
@@ -41,7 +43,12 @@ class TraceCommand extends Command
     private $profileManager = null;
     private array $codeBuffer = [];
     private array $memorySnapshots = [];
-
+    private array $callTreeMap = [];
+    public function __construct()
+    {
+        parent::__construct();
+        $this->callTreeMap = [];
+    }
     public function handle()
     {
         $expression = $this->argument('expression');
@@ -237,7 +244,6 @@ class TraceCommand extends Command
 
         $code = implode("\n", $this->codeBuffer);
 
-        // إذا كان الكود يبدأ بـ GET / أو POST /، حوله إلى route
         if (preg_match('/^(GET|POST|PUT|DELETE)\s+(\/\S+)/', $code, $matches)) {
             $method = $matches[1];
             $uri = $matches[2];
@@ -258,110 +264,89 @@ class TraceCommand extends Command
             $this->displayDiff(end($comparison));
         }
     }
-protected function executeWithFullAnalysis(string $code, bool $silent = false): array
-{
-    $this->resetState();
 
-    // Register instrumenting autoloader BEFORE anything else
-    $instrumentor = new \ResourceThief\Profiling\InstrumentingAutoloader();
-    $instrumentor->register();
-
-    \ResourceThief\Profiling\Tracer::enable((int)($this->option('level') ?? 3));
-
-    if ($this->option('memory')) {
-        $this->takeMemorySnapshot('before_execution');
-    }
-
-    $this->enableFunctionTracing((int)($this->option('level') ?? 3), $this->option('details'));
-    $this->enableQueryListener();
-    $this->enableLoopDetector();
-    $this->enableCollectionInterceptor();
-
-    $startTime = microtime(true);
-    $startMemory = memory_get_usage();
-    $startCpu = getrusage();
-
-    $isRoute = $this->option('route');
-    $params = json_decode($this->option('params') ?? '{}', true);
-
-    try {
-        if ($isRoute) {
-            $result = $this->executeRoute($code, $params);
-        } else {
-            $result = eval("return {$code};");
-        }
-    } catch (\Throwable $e) {
-        $result = $e;
-    }
-
-    $endTime = microtime(true);
-    $endMemory = memory_get_usage();
-    $endCpu = getrusage();
-
-    $duration = round(($endTime - $startTime) * 1000, 2);
-    $memoryUsed = round(($endMemory - $startMemory) / 1024, 2);
-    $cpuTime = $this->calculateCpuTime($startCpu, $endCpu);
-
-    $this->detectNPlusOne();
-    $this->analyzeLoops();
-
-    if ($this->option('memory')) {
-        $this->takeMemorySnapshot('after_execution');
-    }
-
-    // Merge Tracer tree into callTree
-    if ($this->option('tree')) {
-        $tracerTree = \ResourceThief\Profiling\Tracer::getTree();
-        foreach ($tracerTree as $call) {
-            $this->callTree[] = [
-                'id' => $this->callId++,
-                'name' => $call['method'] ?? 'unknown',
-                'duration_ms' => $call['duration_ms'] ?? 0,
-                'memory_kb' => $call['memory_kb'] ?? 0,
-                'depth' => $call['depth'] ?? 0,
-                'parent_id' => $call['parent_id'] ?? null,
-            ];
-        }
-        \ResourceThief\Profiling\Tracer::disable();
-    }
-
-    if (!$silent) {
-        if (!$this->option('warnings') && !$this->option('queries') && !$this->option('summary')) {
-            $this->displayResult($result);
-        }
-
-        if ($this->option('tree')) {
-            $this->displayCallTree((int)($this->option('level') ?? 3));
-        }
-
-        if ($this->option('warnings') || (!$this->option('tree') && !$this->option('queries') && !$this->option('summary'))) {
-            $this->displayWarnings();
-        }
-
-        if ($this->option('queries') || (!$this->option('tree') && !$this->option('warnings') && !$this->option('summary'))) {
-            $this->displayQueries();
-        }
+    protected function executeWithFullAnalysis(string $code, bool $silent = false): array
+    {
+        $this->resetState();
 
         if ($this->option('memory')) {
-            $this->displayMemoryAnalysis();
+            $this->takeMemorySnapshot('before_execution');
         }
 
-        if ($this->option('summary') || (!$this->option('tree') && !$this->option('warnings') && !$this->option('queries'))) {
-            $this->displaySummary($duration, $memoryUsed, $cpuTime);
+        $this->enableFunctionTracing((int)($this->option('level') ?? 3), $this->option('details'));
+        $this->enableQueryListener();
+        $this->enableLoopDetector();
+        $this->enableCollectionInterceptor();
+
+        $startTime = microtime(true);
+        $startMemory = memory_get_usage();
+        $startCpu = getrusage();
+
+        $isRoute = $this->option('route');
+        $params = json_decode($this->option('params') ?? '{}', true);
+
+        try {
+            if ($isRoute) {
+                $result = $this->executeRoute($code, $params);
+            } else {
+                $result = eval("return {$code};");
+            }
+        } catch (\Throwable $e) {
+            $result = $e;
         }
+
+        $endTime = microtime(true);
+        $endMemory = memory_get_usage();
+        $endCpu = getrusage();
+
+        $duration = round(($endTime - $startTime) * 1000, 2);
+        $memoryUsed = round(($endMemory - $startMemory) / 1024, 2);
+        $cpuTime = $this->calculateCpuTime($startCpu, $endCpu);
+
+        $this->detectNPlusOne();
+        $this->analyzeLoops();
+
+        if ($this->option('memory')) {
+            $this->takeMemorySnapshot('after_execution');
+        }
+
+        if (!$silent) {
+            if (!$this->option('warnings') && !$this->option('queries') && !$this->option('summary')) {
+                $this->displayResult($result);
+            }
+
+            if ($this->option('tree')) {
+                $this->displayCallTree((int)($this->option('level') ?? 3));
+            }
+
+            if ($this->option('warnings') || (!$this->option('tree') && !$this->option('queries') && !$this->option('summary'))) {
+                $this->displayWarnings();
+            }
+
+            if ($this->option('queries') || (!$this->option('tree') && !$this->option('warnings') && !$this->option('summary'))) {
+                $this->displayQueries();
+            }
+
+            if ($this->option('memory')) {
+                $this->displayMemoryAnalysis();
+            }
+
+            if ($this->option('summary') || (!$this->option('tree') && !$this->option('warnings') && !$this->option('queries'))) {
+                $this->displaySummary($duration, $memoryUsed, $cpuTime);
+            }
+        }
+
+        return [
+            'time_ms' => $duration,
+            'memory_kb' => $memoryUsed,
+            'memory_mb' => round($memoryUsed / 1024, 2),
+            'queries' => count($this->queries),
+            'query_time_ms' => round(array_sum(array_column($this->queries, 'time')), 2),
+            'result' => $result,
+            'warnings' => $this->warnings,
+            'cpu_time_ms' => $cpuTime,
+        ];
     }
-
-    return [
-        'time_ms' => $duration,
-        'memory_kb' => $memoryUsed,
-        'memory_mb' => round($memoryUsed / 1024, 2),
-        'queries' => count($this->queries),
-        'query_time_ms' => round(array_sum(array_column($this->queries, 'time')), 2),
-        'result' => $result,
-        'warnings' => $this->warnings,
-        'cpu_time_ms' => $cpuTime,
-    ];
-}
 
     protected function executeAndTrace(string $code): void
     {
@@ -374,14 +359,34 @@ protected function executeWithFullAnalysis(string $code, bool $silent = false): 
 
         $query = http_build_query($params);
         $fullUri = $uri . ($query ? '?' . $query : '');
-
         $request = Request::create($fullUri, 'GET');
         $request->server->set('HTTP_HOST', 'shadow.local');
         $request->server->set('SERVER_NAME', 'shadow.local');
 
+        $tracker = new \ResourceThief\Profiling\CallTracker();
+        $tracker->start();
+
         $kernel = app(\Illuminate\Contracts\Http\Kernel::class);
         $response = $kernel->handle($request);
         $kernel->terminate($request, $response);
+
+        // Call track one more time to capture all
+        $tracker->track();
+
+        $calls = $tracker->stop();
+
+        foreach ($calls as $call) {
+            $this->callTree[] = [
+                'id' => $this->callId++,
+                'name' => $call['function'],
+                'duration_ms' => $call['duration_ms'] ?? 0,
+                'memory_kb' => $call['memory_kb'] ?? 0,
+                'depth' => $call['depth'],
+                'parent_id' => $call['parent_id'],
+                'file' => $call['file'],
+                'line' => $call['line'],
+            ];
+        }
 
         return json_decode($response->getContent(), true) ?? $response->getContent();
     }
@@ -396,84 +401,69 @@ protected function executeWithFullAnalysis(string $code, bool $silent = false): 
         $this->loopAnalysis = [];
     }
 
-    
-
-
-protected function enableFunctionTracing(int $maxDepth, bool $showDetails): void
+    protected function enableFunctionTracing(int $maxDepth, bool $showDetails): void
 {
-    $this->callTree = [];
-    $this->callId = 0;
-    $this->lastStackHashes = [];
+    $tracer = $this;
+    $depth = 0;
+    $startTimes = [];
+    $startMemories = [];
 
-    // 1. التقاط استعلامات الـ SQL ومزامنتها مع الـ Depth الحالي للـ Stack
-    \DB::listen(function ($query) use ($maxDepth) {
-        $backtrace = debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS);
-        $filteredStack = $this->filterStack($backtrace);
+    set_error_handler(function($errno, $errstr, $errfile, $errline) use ($tracer, &$depth, &$startTimes, &$startMemories, $maxDepth, $showDetails) {
+        $backtrace = debug_backtrace(DEBUG_BACKTRACE_PROVIDE_OBJECT, 5);
         
-        // الـ SQL يكون مضافاً تحت مستوى الدالة التي استدعته مباشرة
-        $currentDepth = count($filteredStack); 
-
-        if ($currentDepth > $maxDepth) return;
-
-        $this->callTree[] = [
-            'id' => $this->callId++,
-            'name' => '[SQL] ' . trim(preg_replace('/\s+/', ' ', $query->sql)),
-            'type' => 'sql',
-            'depth' => $currentDepth,
-            'file' => $filteredStack[0]['file'] ?? 'unknown',
-            'line' => $filteredStack[0]['line'] ?? 0,
-        ];
-    });
-
-    // 2. محرك قراءة دوال الـ PHP باستخدام الـ Ticks
-    register_tick_function(function () use ($maxDepth, $showDetails) {
-        $backtrace = debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS);
-        $filteredStack = $this->filterStack($backtrace);
-
-        if (empty($filteredStack)) return;
-
-        $currentFrame = $filteredStack[0];
-        $functionName = $currentFrame['function'] ?? 'main';
-        $className = $currentFrame['class'] ?? '';
-        $fullName = $className ? $className . '::' . $functionName : $functionName;
-        
-        $currentDepth = count($filteredStack) - 1;
-
-        if ($currentDepth > $maxDepth) return;
-
-        // توليد مفتاح فريد للاستدعاء بناءً على مكانه والـ Depth لمنع التكرار اللانهائي في الـ Ticks
-        $callKey = $fullName . '_' . $currentDepth . '_' . ($currentFrame['line'] ?? 0);
-
-        if (!isset($this->lastStackHashes[$currentDepth]) || $this->lastStackHashes[$currentDepth] !== $callKey) {
-            $this->lastStackHashes[$currentDepth] = $callKey;
+        if (isset($backtrace[2]['function']) && $depth < $maxDepth) {
+            $function = $backtrace[2]['function'];
+            $class = $backtrace[2]['class'] ?? '';
+            $fullName = $class ? $class . '::' . $function : $function;
             
-            // تنظيف مسارات الفروع الأعمق إذا خرجنا من Scope الدالة
-            foreach (array_keys($this->lastStackHashes) as $d) {
-                if ($d > $currentDepth) unset($this->lastStackHashes[$d]);
+            if (strpos($fullName, 'TraceCommand') !== false || 
+                strpos($fullName, 'Illuminate\Console') !== false ||
+                strpos($fullName, 'Psy\Shell') !== false) {
+                return false;
             }
-
-            // جلب الـ Args فقط لو طلب المستخدم تفاصيل --details
-            $args = [];
-            if ($showDetails) {
-                $fullBacktrace = debug_backtrace(DEBUG_BACKTRACE_PROVIDE_OBJECT, $currentDepth + 2);
-                $args = $fullBacktrace[count($filteredStack) - 1]['args'] ?? [];
-            }
-
-            $this->callTree[] = [
-                'id' => $this->callId++,
+            
+            $callId = $tracer->callId++;
+            
+            $call = [
+                'id' => $callId,
                 'name' => $fullName,
-                'type' => 'function',
-                'depth' => $currentDepth,
-                'args' => $showDetails ? $this->sanitizeArgs($args) : [],
-                'file' => $currentFrame['file'] ?? 'unknown',
-                'line' => $currentFrame['line'] ?? 0,
+                'file' => $backtrace[2]['file'] ?? 'unknown',
+                'line' => $backtrace[2]['line'] ?? 0,
+                'depth' => $depth,
+                'parent_id' => end($tracer->currentBranch) ?: null,
             ];
+            
+            if ($showDetails && isset($backtrace[2]['args'])) {
+                $call['args'] = $tracer->sanitizeArgs($backtrace[2]['args']);
+            }
+            
+            $tracer->callTree[] = $call;
+            $tracer->currentBranch[] = $callId;
+            $startTimes[$callId] = microtime(true);
+            $startMemories[$callId] = memory_get_usage();
+            $depth++;
+        }
+        
+        return false;
+    });
+    
+    register_shutdown_function(function() use ($tracer, &$depth, &$startTimes, &$startMemories) {
+        if (!empty($tracer->currentBranch)) {
+            $callId = array_pop($tracer->currentBranch);
+            $duration = round((microtime(true) - $startTimes[$callId]) * 1000, 2);
+            $memory = round((memory_get_usage() - $startMemories[$callId]) / 1024, 2);
+            
+            foreach ($tracer->callTree as &$call) {
+                if ($call['id'] === $callId) {
+                    $call['duration_ms'] = $duration;
+                    $call['memory_kb'] = $memory;
+                    break;
+                }
+            }
+            $depth--;
         }
     });
-
-    declare(ticks=1);
 }
-
 
     protected function enableQueryListener(): void
     {
@@ -773,6 +763,7 @@ protected function enableFunctionTracing(int $maxDepth, bool $showDetails): void
         }
     }
 
+
     protected function printTreeNode(array $node, int $currentDepth, int $maxDepth): void
     {
         if ($currentDepth >= $maxDepth) {
@@ -782,6 +773,10 @@ protected function enableFunctionTracing(int $maxDepth, bool $showDetails): void
         $indent = str_repeat('  ', $currentDepth);
         $branch = $currentDepth > 0 ? $this->color('├─ ', 'CYAN') : '';
 
+        // Change this line
+        $duration = $node['duration_ms'] ?? $node['duration'] ?? 0;
+        $memory = $node['memory_kb'] ?? $node['memory'] ?? 0;
+
         if ($node['name'] === 'SQL') {
             $sql = substr($node['sql'], 0, 60);
             $line = sprintf(
@@ -789,12 +784,9 @@ protected function enableFunctionTracing(int $maxDepth, bool $showDetails): void
                 $indent,
                 $branch,
                 $this->color("[SQL]", 'BLUE'),
-                $this->color($sql . " (" . $node['duration_ms'] . " ms)", 'DIM')
+                $this->color($sql . " (" . ($node['duration_ms'] ?? 0) . " ms)", 'DIM')
             );
         } else {
-            $duration = $node['duration_ms'] ?? 0;
-            $memory = $node['memory_kb'] ?? 0;
-
             $durationColor = $duration > 100 ? 'LIGHT_RED' : ($duration > 10 ? 'YELLOW' : 'LIGHT_GREEN');
             $durationStr = $this->color("{$duration} ms", $durationColor);
             $memoryStr = $this->color("{$memory} KB", 'LIGHT_GREEN');
@@ -1226,178 +1218,111 @@ protected function enableFunctionTracing(int $maxDepth, bool $showDetails): void
         return "\033[" . implode(';', $codes) . "m{$text}\033[0m";
     }
 
+    // Add these three methods at the end of the class, just before the last closing brace.
 
-
-
-
-
-
-
-// داخل كود الـ Profiler Core الخاص بالحزمة (او الـ TraceCommand)
-
-protected array $lastStackHashes = [];
-
-public function startTracing(int $maxDepth, bool $showDetails): void
-{
-    $this->callTree = [];
-    $this->currentBranch = [];
-    $this->callId = 0;
-    $this->lastStackHashes = [];
-
-    // 1. التقاط استعلامات الـ SQL ومزامنتها مع الـ Depth الحالي للـ Stack
-    \DB::listen(function ($query) use ($maxDepth) {
-        // جلب الـ Backtrace الحالي لنعرف الاستعلام طالع من أي دالة بالظبط والـ Depth كام
-        $backtrace = debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS);
-        $filteredStack = $this->filterStack($backtrace);
-        
-        $currentDepth = count($filteredStack); // الـ SQL بكون تحت الدالة الحالية مباشرة (+1)
-
-        if ($currentDepth > $maxDepth) return;
-
-        $callId = $this->callId++;
-        
-        $this->callTree[] = [
-            'id' => $callId,
-            'name' => '[SQL] ' . $this->normalizeQuery($query->sql),
-            'type' => 'sql',
-            'time' => $query->time,
-            'depth' => $currentDepth,
-            'file' => $filteredStack[0]['file'] ?? 'unknown',
-            'line' => $filteredStack[0]['line'] ?? 0,
-        ];
-    });
-
-    // 2. محرك قراءة دوال الـ PHP باستخدام الـ Ticks
-    register_tick_function(function () use ($maxDepth, $showDetails) {
-        $backtrace = debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS);
-        $filteredStack = $this->filterStack($backtrace);
-
-        if (empty($filteredStack)) return;
-
-        $currentFrame = $filteredStack[0];
-        $functionName = $currentFrame['function'] ?? 'main';
-        $className = $currentFrame['class'] ?? '';
-        $fullName = $className ? $className . '::' . $functionName : $functionName;
-        
-        $currentDepth = count($filteredStack) - 1;
-
-        if ($currentDepth > $maxDepth) return;
-
-        // توليد مفتاح فريد للاستدعاء بناءً على مكانه والـ Depth
-        $callKey = $fullName . '_' . $currentDepth . '_' . ($currentFrame['line'] ?? 0);
-
-        if (!isset($this->lastStackHashes[$currentDepth]) || $this->lastStackHashes[$currentDepth] !== $callKey) {
-            $callId = $this->callId++;
-            $this->lastStackHashes[$currentDepth] = $callKey;
-            
-            // تنظيف مسارات الفروع الأعمق إذا خرجنا من Scope دالة عودية
-            foreach (array_keys($this->lastStackHashes) as $d) {
-                if ($d > $currentDepth) unset($this->lastStackHashes[$d]);
-            }
-
-            // جلب الـ Args فقط لو طلب المستخدم تفاصيل --details
-            $args = [];
-            if ($showDetails) {
-                $fullBacktrace = debug_backtrace(DEBUG_BACKTRACE_PROVIDE_OBJECT, $currentDepth + 2);
-                $args = $fullBacktrace[count($filteredStack) - 1]['args'] ?? [];
-            }
-
-            $this->callTree[] = [
-                'id' => $callId,
-                'name' => $fullName,
-                'type' => 'function',
-                'depth' => $currentDepth,
-                'args' => $showDetails ? $this->sanitizeArgs($args) : [],
-                'file' => $currentFrame['file'] ?? 'unknown',
-                'line' => $currentFrame['line'] ?? 0,
-            ];
+    protected function traceRouteWithXdebug(string $uri, array $params = []): void
+    {
+        // Enable Xdebug Tracing if available
+        if (function_exists('xdebug_start_trace')) {
+            xdebug_start_trace('/tmp/trace.xt');
+            $this->info($this->color("Xdebug tracing active", 'GREEN'));
         }
-    });
 
-    // إجبار الـ PHP على تفعيل الـ Ticks في ملف الـ Command الحالي
-    declare(ticks=1);
-}
+        // Create request
+        $query = http_build_query($params);
+        $fullUri = $uri . ($query ? '?' . $query : '');
+        $request = Request::create($fullUri, 'GET');
+        $request->server->set('HTTP_HOST', 'shadow.local');
+        $request->server->set('SERVER_NAME', 'shadow.local');
 
-/**
- * فلترة الـ Stack لتجاهل دوال الحزمة نفسها حتى لا تظهر في الشجرة
- */
-protected function filterStack(array $backtrace): array
-{
-    return array_values(array_filter($backtrace, function ($frame) {
-        $class = $frame['class'] ?? '';
-        $function = $frame['function'] ?? '';
-        $fullName = $class ? $class . '::' . $function : $function;
-        
-        return strpos($fullName, 'TraceCommand') === false && 
-               strpos($fullName, 'ResourceThief') === false &&
-               $function !== 'debug_backtrace' && 
-               $function !== '{closure}';
-    }));
-}
+        // Manual call tracking
+        $controller = null;
+        $action = null;
 
-/**
- * اختصار وتنظيف الـ SQL للطباعة بشكل مريح وموحد
- */
-protected function normalizeQuery(string $sql): string
-{
-    $sql = preg_replace('/\s+/', ' ', $sql);
-    return trim($sql);
-}
+        // Find the route and controller
+        $route = app('router')->getRoutes()->match($request);
+        $action = $route->getActionName();
 
+        if ($action && $action !== 'Closure') {
+            $parts = explode('@', $action);
+            $controllerClass = $parts[0];
+            $method = $parts[1] ?? '__invoke';
 
-public function renderTree(): void
-{
-    if (empty($this->callTree)) {
-        echo "No call tree captured\n";
-        return;
+            if (class_exists($controllerClass)) {
+                $controller = app($controllerClass);
+                $this->traceControllerCall($controller, $method, $route->parameters());
+            }
+        } else {
+            // It's a closure
+            $this->traceClosureExecution($route->getAction()['uses'] ?? $route->getAction()['controller'] ?? null);
+        }
+
+        // Stop Xdebug
+        if (function_exists('xdebug_stop_trace')) {
+            xdebug_stop_trace();
+            $this->line($this->color("Trace saved to /tmp/trace.xt", 'DIM'));
+            $this->line($this->color("Run: xdg-open /tmp/trace.xt", 'DIM'));
+        }
     }
 
-    foreach ($this->callTree as $index => $node) {
-        $indent = '';
-        
-        // بناء الـ Prefix الشجري بناءً على الـ Depth الخاص بالـ Node
-        for ($i = 0; $i < $node['depth']; $i++) {
-            $indent .= ($i === $node['depth'] - 1) ? ' ├─ ' : ' │  ';
-        }
+    protected function traceControllerCall($controller, string $method, array $parameters): void
+    {
+        $startTime = microtime(true);
+        $startMemory = memory_get_usage();
 
-        // إذا كان العنصر الأخير في الفرع، نقوم بتحسين الرمز ليكون زاوية نهاية └─
-        if ($this->isLastChild($index)) {
-            $indent = '';
-            for ($i = 0; $i < $node['depth']; $i++) {
-                $indent .= ($i === $node['depth'] - 1) ? ' └─ ' : ' │  ';
+        $reflection = new \ReflectionMethod($controller, $method);
+
+        // Record the main call
+        $this->recordCall($reflection->class . '::' . $reflection->name, $parameters, 0, $startTime);
+
+        // Invoke the method
+        $result = $reflection->invokeArgs($controller, $parameters);
+
+        $endTime = microtime(true);
+        $duration = round(($endTime - $startTime) * 1000, 2);
+        $memoryUsed = round((memory_get_usage() - $startMemory) / 1024, 2);
+
+        // Update the call with metrics
+        foreach ($this->callTree as &$call) {
+            if ($call['name'] === $reflection->class . '::' . $reflection->name && $call['depth'] === 0) {
+                $call['duration_ms'] = $duration;
+                $call['memory_kb'] = $memoryUsed;
+                break;
             }
         }
 
-        // طباعة السطر
-        $output = $indent . $node['name'];
-        
-        // إضافة مؤشر تحذيري لو الاستعلام متكرر N+1
-        if ($node['type'] === 'sql' && $this->isNPlusOne($node['name'])) {
-            $output .= " (N+1 queries هنا)";
-        }
-
-        echo $output . "\n";
+        $this->displayCallTree((int)($this->option('level') ?? 3));
+        $this->displayResult($result);
     }
-}
 
-protected function isLastChild(int $currentIndex): bool
-{
-    $currentNode = $this->callTree[$currentIndex];
-    $currentDepth = $currentNode['depth'];
+    protected function traceClosureExecution($closure): void
+    {
+        if (!$closure instanceof \Closure) {
+            $this->error("Cannot trace non-closure route");
+            return;
+        }
 
-    // نبحث في العناصر القادمة، لو لقينا عنصر على نفس الـ Depth أو أقل منه، يعني الحالي مش الأخير
-    for ($i = $currentIndex + 1; $i < count($this->callTree); $i++) {
-        if ($this->callTree[$i]['depth'] === $currentDepth) {
-            return false;
+        $startTime = microtime(true);
+        $startMemory = memory_get_usage();
+
+        $reflection = new \ReflectionFunction($closure);
+        $this->recordCall('Closure::__invoke', [], 0, $startTime);
+
+        $result = $closure();
+
+        $endTime = microtime(true);
+        $duration = round(($endTime - $startTime) * 1000, 2);
+        $memoryUsed = round((memory_get_usage() - $startMemory) / 1024, 2);
+
+        foreach ($this->callTree as &$call) {
+            if ($call['name'] === 'Closure::__invoke' && $call['depth'] === 0) {
+                $call['duration_ms'] = $duration;
+                $call['memory_kb'] = $memoryUsed;
+                break;
+            }
         }
-        if ($this->callTree[$i]['depth'] < $currentDepth) {
-            return true;
-        }
+
+        $this->displayCallTree((int)($this->option('level') ?? 3));
+        $this->displayResult($result);
     }
-    return true;
-}
-
-
-
-
 }

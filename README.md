@@ -126,11 +126,7 @@ php artisan trace "DB::table('users')->get()" --tree --summary
 ================================================================================
 CALL TREE (Max Depth: 3)
 ================================================================================
-DB::table [0.05 ms, 2.1 KB]
-  ├─ DatabaseManager::table [0.12 ms, 4.5 KB]
-  └─ Builder::get [1247.32 ms, 87450.2 KB]
-      ├─ [SQL] select * from "users" (1247.32 ms)
-      └─ Collection::__construct [7.15 ms, 50.3 KB]
+🚧 
 
 ================================================================================
 SUMMARY
@@ -188,14 +184,7 @@ Executing route: /api/users/123
 ================================================================================
 CALL TREE (Max Depth: 5)
 ================================================================================
-App\Http\Controllers\UserController::show [45.23 ms, 2100.5 KB]
-  ├─ Illuminate\Routing\Controller::callAction [44.98 ms, 2098.2 KB]
-  │   ├─ App\Http\Controllers\UserController::show [44.50 ms, 2095.0 KB]
-  │   │   ├─ App\Services\UserService::find [32.10 ms, 1500.3 KB]
-  │   │   │   ├─ [SQL] select * from users where id = 123 (15.20 ms)
-  │   │   │   └─ Cache::get [2.15 ms, 50.2 KB]
-  │   │   └─ App\Http\Resources\UserResource::make [12.35 ms, 594.8 KB]
-  │   └─ Illuminate\Routing\Route::run [44.80 ms, 2090.0 KB]
+🚧 
 
 ================================================================================
 SUMMARY
@@ -453,15 +442,7 @@ php artisan trace --route /api/checkout/process --params='{"user_id":123}' --tre
 ================================================================================
 CALL TREE (Max Depth: 4)
 ================================================================================
-CheckoutController::process [8450.23 ms, 184.5 MB]
-  ├─ User::find [2.45 ms, 0.5 MB]
-  ├─ Cart::with('items') [45.32 ms, 12.3 MB]
-  ├─ Order::create [12.34 ms, 2.1 MB]
-  ├─ [CRITICAL] Loop: 250 items [3450.67 ms, 67.8 MB]
-  │   ├─ OrderItem::create (250 times) [1250 ms]
-  │   └─ Product::decrement (250 times) [950 ms]
-  ├─ Mail::send [2450.78 ms, 4.5 MB]
-  └─ Http::post [1234.56 ms, 2.3 MB]
+🚧 
 
 ================================================================================
 RESOURCE THIEF WARNINGS
@@ -509,19 +490,7 @@ Executing route: /engine-metrics/complex-join
 ================================================================================
 CALL TREE (Max Depth: 3)
 ================================================================================
-Closure::__invoke [1247.32 ms, 87450.2 KB]
-  ├─ DB::table [0.05 ms, 2.1 KB]
-  │   └─ JoinClause::__construct [0.03 ms, 1.0 KB]
-  ├─ Builder::get [1247.15 ms, 87448.0 KB]
-  │   └─ [SQL] select film.film_id, film.title, inventory.inventory_id, 
-  │            rental.rental_date, customer.first_name, customer.last_name
-  │        from film
-  │        inner join inventory on film.film_id = inventory.film_id
-  │        inner join rental on inventory.inventory_id = rental.inventory_id
-  │        inner join customer on rental.customer_id = customer.customer_id
-  │        order by rental.rental_date desc
-  │        limit 1000 (1247.15 ms)
-  └─ Collection::groupBy [0.12 ms, 2.1 KB]
+🚧 
 
 ================================================================================
 SQL QUERIES

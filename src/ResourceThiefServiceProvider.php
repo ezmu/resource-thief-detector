@@ -4,6 +4,7 @@ namespace ResourceThief;
 
 use Illuminate\Support\ServiceProvider;
 use ResourceThief\Console\TraceCommand;
+// use ResourceThief\Console\TraceTreeCommand;
 
 class ResourceThiefServiceProvider extends ServiceProvider
 {
@@ -12,6 +13,7 @@ class ResourceThiefServiceProvider extends ServiceProvider
         if ($this->app->runningInConsole()) {
             $this->commands([
                 TraceCommand::class,
+                // TraceTreeCommand::class, 
             ]);
         }
 

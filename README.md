@@ -545,15 +545,6 @@ php artisan trace --profile-name=test --compare --report --save
 php artisan trace
 ```
 ---
-## ⚠️ Work in Progress
-
-**Route Call Tree** is currently under construction 🚧
-
-✅ Works: Raw PHP code call tree  
-🚧 Coming: Route call tree (requires Xdebug integration)
-
-All other features are fully functional.
----
 ## Contributing
 
 If you hate bloated enterprise software and want to make this tool even sharper (like adding flame-graphs, profiling long-running background jobs, or database specific indexing advice), feel free to fork this repository and submit a Pull Request.
